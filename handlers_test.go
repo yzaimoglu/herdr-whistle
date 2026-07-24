@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -16,30 +17,44 @@ import (
 // a command flag must not be treated as the name/command separator.
 func TestParseStartAgentArgs(t *testing.T) {
 	tests := []struct {
-		in      string
-		name    string
-		cmdArgs []string
+		in                 string
+		name, kind, paneID string
+		agentArgs          []string
 	}{
-		{"myagent", "myagent", nil},
-		{"myagent echo hi", "myagent", []string{"echo", "hi"}},
-		{"myagent -- echo hi", "myagent", []string{"echo", "hi"}},
-		// Flag after the real separator is preserved verbatim.
-		{"myagent -- echo --verbose", "myagent", []string{"echo", "--verbose"}},
-		// No "--" at all: everything after the name is the command, flags kept.
-		{"myagent claude --model x", "myagent", []string{"claude", "--model", "x"}},
-		// Trailing separator with nothing after -> no command args.
-		{"myagent --", "myagent", nil},
-		{"", "", nil},
-		{"   ", "", nil},
+		{"helper opencode w1:p2", "helper", "opencode", "w1:p2", nil},
+		{"helper claude w1:p2 -- --model sonnet", "helper", "claude", "w1:p2", []string{"--model", "sonnet"}},
+		{"helper codex w1:p2 --full-auto", "helper", "codex", "w1:p2", []string{"--full-auto"}},
+		{"helper opencode w1:p2 --", "helper", "opencode", "w1:p2", nil},
+		{"helper", "", "", "", nil},
+		{"", "", "", "", nil},
 	}
 	for _, tt := range tests {
-		name, cmdArgs := parseStartAgentArgs(tt.in)
-		if name != tt.name {
-			t.Errorf("parseStartAgentArgs(%q) name = %q, want %q", tt.in, name, tt.name)
+		name, kind, paneID, agentArgs := parseStartAgentArgs(tt.in)
+		if name != tt.name || kind != tt.kind || paneID != tt.paneID {
+			t.Errorf("parseStartAgentArgs(%q) = (%q, %q, %q), want (%q, %q, %q)", tt.in, name, kind, paneID, tt.name, tt.kind, tt.paneID)
 		}
-		if !reflect.DeepEqual(cmdArgs, tt.cmdArgs) {
-			t.Errorf("parseStartAgentArgs(%q) cmdArgs = %v, want %v", tt.in, cmdArgs, tt.cmdArgs)
+		if !reflect.DeepEqual(agentArgs, tt.agentArgs) {
+			t.Errorf("parseStartAgentArgs(%q) agentArgs = %v, want %v", tt.in, agentArgs, tt.agentArgs)
 		}
+	}
+}
+
+func TestNormalizeAgentReadOutput(t *testing.T) {
+	plain := "line one\nline two"
+	if got := normalizeAgentReadOutput(plain); got != plain {
+		t.Errorf("plain output = %q, want %q", got, plain)
+	}
+	legacy := `{"id":"cli:agent:read","result":{"read":{"text":"legacy text","pane_id":"w1:p1"}}}`
+	if got := normalizeAgentReadOutput(legacy); got != "legacy text" {
+		t.Errorf("legacy output = %q, want legacy text", got)
+	}
+}
+
+func TestAgentStartCommandArgs(t *testing.T) {
+	want := []string{"agent", "start", "reviewer", "--kind", "claude", "--pane", "w1:p2", "--", "--model", "sonnet"}
+	got := agentStartCommandArgs("reviewer", "claude", "w1:p2", "--model", "sonnet")
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("agentStartCommandArgs = %v, want %v", got, want)
 	}
 }
 
@@ -47,27 +62,77 @@ func TestParseStartAgentArgs(t *testing.T) {
 // menus: option 1 is just Enter, option N is (N-1) Downs then Enter.
 func TestChoiceKeys(t *testing.T) {
 	tests := []struct {
-		idx  int
-		want []string
+		active, selected int
+		want             []string
 	}{
-		{1, []string{"Enter"}},
-		{2, []string{"Down", "Enter"}},
-		{3, []string{"Down", "Down", "Enter"}},
-		{5, []string{"Down", "Down", "Down", "Down", "Enter"}},
+		{0, 1, []string{"Enter"}},
+		{0, 3, []string{"Down", "Down", "Enter"}},
+		{2, 1, []string{"Up", "Up", "Enter"}},
+		{2, 3, []string{"Enter"}},
 	}
 	for _, tt := range tests {
-		got := choiceKeys(tt.idx)
+		got := choiceKeys(tt.active, tt.selected)
 		if !reflect.DeepEqual(got, tt.want) {
-			t.Errorf("choiceKeys(%d) = %v, want %v", tt.idx, got, tt.want)
+			t.Errorf("choiceKeys(%d, %d) = %v, want %v", tt.active, tt.selected, got, tt.want)
 		}
+	}
+}
+
+func TestDeliverCursorChoiceSendsAndVerifiesOneKeyAtATime(t *testing.T) {
+	choices := []parsedChoice{{CleanText: "First"}, {CleanText: "Second"}, {CleanText: "Third"}}
+	initial := &parsedChoices{Prompt: "Pick one", ActiveIndex: 0, Choices: choices}
+	active := 0
+	var sent []string
+	err := deliverCursorChoice(
+		initial,
+		3,
+		func(key string) error {
+			sent = append(sent, key)
+			if key == "Down" {
+				active++
+			}
+			return nil
+		},
+		func() *parsedChoices {
+			return &parsedChoices{Prompt: "Pick one", ActiveIndex: active, Choices: choices}
+		},
+		func() error { return nil },
+		func() {},
+	)
+	if err != nil {
+		t.Fatalf("deliverCursorChoice failed: %v", err)
+	}
+	want := []string{"Down", "Down", "Enter"}
+	if !reflect.DeepEqual(sent, want) {
+		t.Fatalf("keys sent = %v, want separate calls %v", sent, want)
+	}
+}
+
+func TestDeliverCursorChoiceDoesNotSubmitIfCursorDoesNotMove(t *testing.T) {
+	choices := []parsedChoice{{CleanText: "First"}, {CleanText: "Second"}}
+	initial := &parsedChoices{Prompt: "Pick one", ActiveIndex: 0, Choices: choices}
+	var sent []string
+	err := deliverCursorChoice(
+		initial,
+		2,
+		func(key string) error { sent = append(sent, key); return nil },
+		func() *parsedChoices { return &parsedChoices{Prompt: "Pick one", ActiveIndex: 0, Choices: choices} },
+		func() error { return nil },
+		func() {},
+	)
+	if err == nil {
+		t.Fatal("expected cursor verification failure")
+	}
+	if !reflect.DeepEqual(sent, []string{"Down"}) {
+		t.Fatalf("unsafe keys sent after cursor failed to move: %v", sent)
 	}
 }
 
 func TestFormatAgentFromGet(t *testing.T) {
 	t.Run("valid agent", func(t *testing.T) {
-		in := `{"id":"cli:agent:get","result":{"agent":{"agent":"claude","agent_status":"blocked","pane_id":"wA:p1","workspace_id":"wA","cwd":"/home/user/proj"}}}`
+		in := `{"id":"cli:agent:get","result":{"agent":{"name":"reviewer","agent":"claude","agent_status":"blocked","pane_id":"wA:p1","terminal_id":"term_1","workspace_id":"wA","cwd":"/home/user/proj"}}}`
 		got := formatAgentFromGet(in)
-		want := "<b>claude</b>\n\nStatus: blocked\nPane: wA:p1\nWorkspace: wA\nCwd: /home/user/proj"
+		want := "<b>reviewer</b>\n\nStatus: blocked\nPane: wA:p1\nWorkspace: wA\nCwd: /home/user/proj"
 		if got != want {
 			t.Errorf("formatAgentFromGet(valid) = %q, want %q", got, want)
 		}
@@ -123,12 +188,31 @@ func TestEscapeHTML(t *testing.T) {
 	}
 }
 
+func TestEscapeHTMLLimitedKeepsEntitiesWhole(t *testing.T) {
+	if got := escapeHTMLLimited("&&&&", 6); got != "&amp;…" {
+		t.Errorf("escapeHTMLLimited = %q", got)
+	}
+}
+
 func TestSanitizeTTY(t *testing.T) {
-	// Control chars below 0x20 are stripped except \n, \r, \t.
+	// Terminal controls are stripped while prompt line breaks and tabs remain.
 	in := "clean\x00text\x07bell\nline2\r\ttab"
-	want := "cleantextbell\nline2\r\ttab"
+	want := "cleantextbell\nline2\ttab"
 	if got := sanitizeTTY(in); got != want {
 		t.Errorf("sanitizeTTY = %q, want %q", got, want)
+	}
+}
+
+func TestParseSendRequestPreservesPromptLayout(t *testing.T) {
+	target, prompt := parseSendRequest("/send reviewer First line\n  indented second line")
+	if target != "reviewer" {
+		t.Errorf("target = %q", target)
+	}
+	if prompt != "First line\n  indented second line" {
+		t.Errorf("prompt = %q", prompt)
+	}
+	if target, prompt := parseSendRequest("/send reviewer"); target != "" || prompt != "" {
+		t.Errorf("incomplete request = (%q, %q)", target, prompt)
 	}
 }
 
@@ -170,6 +254,22 @@ func TestOwnerAuthNilMessage(t *testing.T) {
 	}
 }
 
+func TestIsAuthorizedRequiresOwnerAndPrivateChat(t *testing.T) {
+	original := cfgGlobal
+	cfgGlobal = &Config{OwnerID: 42, ChatID: 42}
+	defer func() { cfgGlobal = original }()
+
+	if !isAuthorized(42, 42) {
+		t.Error("expected configured owner in configured chat to be authorized")
+	}
+	if isAuthorized(7, 42) {
+		t.Error("expected another user to be rejected")
+	}
+	if isAuthorized(42, -100123) {
+		t.Error("expected owner in another chat to be rejected")
+	}
+}
+
 const emptyAgentListJSON = `{"id":"cli:agent:list","result":{"agents":[]}}`
 
 func TestBuildAgentListEmpty(t *testing.T) {
@@ -181,11 +281,15 @@ func TestBuildAgentListEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(msg, "No agents running") {
+	if !strings.Contains(msg, "0 agents") {
 		t.Errorf("expected empty-list message, got %q", msg)
 	}
-	if kb != nil {
-		t.Errorf("expected nil keyboard for empty list, got %+v", kb)
+	if kb == nil || len(kb.InlineKeyboard) < 4 {
+		t.Fatalf("expected dashboard controls, got %+v", kb)
+	}
+	last := kb.InlineKeyboard[len(kb.InlineKeyboard)-1]
+	if len(last) != 2 || last[0].CallbackData != "al|list|all|0" || last[1].CallbackData != "al|help" {
+		t.Errorf("unexpected refresh/help row: %+v", last)
 	}
 }
 
@@ -200,29 +304,100 @@ func TestBuildAgentList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(msg, "Agents (2)") {
+	if !strings.Contains(msg, "2 agents") {
 		t.Errorf("expected count header, got %q", msg)
 	}
-	if !strings.Contains(msg, "claude") || !strings.Contains(msg, "opencode") {
-		t.Errorf("expected both agent names in %q", msg)
+	if kb == nil || len(kb.InlineKeyboard) < 6 {
+		t.Fatalf("expected agent rows and dashboard controls, got %v", kb)
 	}
-	if kb == nil || len(kb.InlineKeyboard) != 3 {
-		t.Fatalf("expected 3 keyboard rows (2 agents + refresh), got %v", kb)
-	}
-	// Row 0: status/read/close buttons wired to the first pane.
+	// Each agent is represented by one readable open button backed by a token.
 	row := kb.InlineKeyboard[0]
-	if len(row) != 3 {
-		t.Fatalf("expected 3 buttons in row 0, got %d", len(row))
+	if len(row) != 1 {
+		t.Fatalf("expected 1 button in row 0, got %d", len(row))
 	}
-	want := []string{"al|status|wA:p1", "al|read|wA:p1", "al|close|wA:p1"}
-	for i, w := range want {
-		if row[i].CallbackData != w {
-			t.Errorf("row0[%d] data=%q, want %q", i, row[i].CallbackData, w)
+	if !strings.Contains(row[0].Text, "reviewer") || !strings.HasPrefix(row[0].CallbackData, "al|open|") {
+		t.Errorf("unexpected first agent button: %+v", row[0])
+	}
+	last := kb.InlineKeyboard[len(kb.InlineKeyboard)-1]
+	if len(last) != 2 || last[0].CallbackData != "al|list|all|0" || last[1].CallbackData != "al|help" {
+		t.Errorf("unexpected last row: %+v", last)
+	}
+}
+
+func TestBuildAgentDetail(t *testing.T) {
+	agent := agentInfo{
+		Name: "reviewer", Agent: "claude", AgentStatus: "blocked",
+		PaneID: "wA:p1", TerminalID: "term-1", WorkspaceID: "wA", Cwd: "/tmp/project",
+	}
+	message, keyboard, err := buildAgentDetail(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(message, "reviewer") || !strings.Contains(message, "Needs input") || !strings.Contains(message, "wA:p1") {
+		t.Errorf("unexpected detail message: %q", message)
+	}
+	if keyboard == nil || len(keyboard.InlineKeyboard) != 4 {
+		t.Fatalf("unexpected detail keyboard: %+v", keyboard)
+	}
+	wantActions := []string{"al|prompt|", "al|output|", "al|open|", "al|interrupt|", "al|request_close|", "al|back"}
+	var callbacks []string
+	for _, row := range keyboard.InlineKeyboard {
+		for _, button := range row {
+			callbacks = append(callbacks, button.CallbackData)
 		}
 	}
-	// Last row: the refresh button.
-	last := kb.InlineKeyboard[2]
-	if len(last) != 1 || last[0].CallbackData != "al|refresh" {
-		t.Errorf("unexpected last row: %+v", last)
+	for i, prefix := range wantActions {
+		if !strings.HasPrefix(callbacks[i], prefix) {
+			t.Errorf("callback %d = %q, want prefix %q", i, callbacks[i], prefix)
+		}
+		if len(callbacks[i]) > 64 {
+			t.Errorf("callback exceeds Telegram limit: %q", callbacks[i])
+		}
+	}
+}
+
+func TestValidateAgentSnapshotRejectsSessionlessReplacement(t *testing.T) {
+	expected := agentInfo{Agent: "claude", PaneID: "w1:p1", TerminalID: "term-1", StateChangeSeq: 10}
+	replacement := expected
+	replacement.StateChangeSeq = 11
+	if err := validateAgentSnapshot(expected, replacement); err == nil {
+		t.Fatal("sessionless replacement was accepted")
+	}
+	if err := validateAgentSnapshot(expected, expected); err != nil {
+		t.Fatalf("unchanged sessionless agent rejected: %v", err)
+	}
+}
+
+func TestAgentUILabelDisambiguatesUnnamedAgents(t *testing.T) {
+	first := agentInfo{Agent: "opencode", PaneID: "w1:p1"}
+	second := agentInfo{Agent: "opencode", PaneID: "w1:p2"}
+	if agentUILabel(first) == agentUILabel(second) {
+		t.Fatal("unnamed agents received identical UI labels")
+	}
+	if got := agentUILabel(agentInfo{Name: "reviewer", Agent: "claude", PaneID: "w1:p3"}); got != "reviewer" {
+		t.Errorf("named agent label = %q", got)
+	}
+}
+
+func TestPendingPromptReplyMatchCapturesCommands(t *testing.T) {
+	original := pendingPrompts
+	pendingPrompts = newPromptRegistry(time.Minute, 10)
+	defer func() { pendingPrompts = original }()
+	pendingPrompts.register(42, 7, 42, agentInfo{PaneID: "w1:p1", TerminalID: "term-1"})
+	update := &models.Update{Message: &models.Message{
+		Text:           "/close anything",
+		From:           &models.User{ID: 42},
+		Chat:           models.Chat{ID: 42},
+		ReplyToMessage: &models.Message{ID: 7},
+	}}
+	if !pendingPromptReplyMatch(update) {
+		t.Fatal("command-like ForceReply was not captured")
+	}
+	update.Message.Text = ""
+	if pendingPromptReplyMatch(update) {
+		t.Fatal("empty reply matched pending prompt")
+	}
+	if !pendingPrompts.has(42, 7, 42) {
+		t.Fatal("empty reply consumed pending prompt")
 	}
 }

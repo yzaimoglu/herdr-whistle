@@ -10,3 +10,6 @@ token = ""
 
 # Your Telegram user ID (numeric). The bot only responds to this user.
 owner_id = 0
+
+# Your private chat ID with the bot. For private chats this equals owner_id.
+chat_id = 0

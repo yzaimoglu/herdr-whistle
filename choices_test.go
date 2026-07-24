@@ -29,6 +29,14 @@ func TestParseBoxChoicesBasic(t *testing.T) {
 	}
 }
 
+func TestParseBoxChoicesHeavyBorder(t *testing.T) {
+	input := "┃\n┃  Choose a deployment\n┃\n┃  1. Staging\n┃  2. Production\n┃\n"
+	pc := parseBoxChoices(input)
+	if pc == nil || pc.Prompt != "Choose a deployment" || len(pc.Choices) != 2 {
+		t.Fatalf("heavy-border choices not parsed: %+v", pc)
+	}
+}
+
 func TestParseBoxChoicesWithContinuationLines(t *testing.T) {
 	input := "\u2502\n\u2502  Which framework?\n\u2502\n\u2502  1. React\n\u2502     A JavaScript library for building user interfaces\n\u2502  2. Vue\n\u2502     Another framework with a gentle learning curve\n\u2502  3. Svelte\n\u2502\n"
 	pc := parseBoxChoices(input)
@@ -151,11 +159,136 @@ func TestParseChoicesClackSingleSelect(t *testing.T) {
 	if len(pc.Choices) != 3 {
 		t.Fatalf("expected 3 choices, got %d: %+v", len(pc.Choices), pc.Choices)
 	}
+	if pc.ActiveIndex != 0 {
+		t.Errorf("expected active index 0, got %d", pc.ActiveIndex)
+	}
 	want := []string{"Next.js", "Nuxt", "Remix"}
 	for i, w := range want {
 		if pc.Choices[i].CleanText != w {
 			t.Errorf("choice %d: expected '%s', got '%s'", i, w, pc.Choices[i].CleanText)
 		}
+	}
+}
+
+func TestParseChoicesClaudePermissionPrompt(t *testing.T) {
+	input := "Do you want to proceed?\n" +
+		"❯ 1. Yes\n" +
+		"  2. Yes, and don't ask again\n" +
+		"  3. No\n" +
+		"Enter to select · Tab/Arrow keys to navigate\n" +
+		"Esc to cancel\n"
+	pc := parseChoices(input)
+	if pc == nil {
+		t.Fatal("Claude permission prompt was not parsed")
+	}
+	if pc.Prompt != "Do you want to proceed?" || pc.ActiveIndex != 0 {
+		t.Fatalf("unexpected Claude prompt: %+v", pc)
+	}
+	want := []string{"Yes", "Yes, and don't ask again", "No"}
+	if len(pc.Choices) != len(want) {
+		t.Fatalf("Claude choices = %+v", pc.Choices)
+	}
+	for i := range want {
+		if pc.Choices[i].CleanText != want[i] {
+			t.Errorf("choice %d = %q, want %q", i, pc.Choices[i].CleanText, want[i])
+		}
+	}
+}
+
+func TestParseChoicesCodexApprovalPrompt(t *testing.T) {
+	input := "Allow command?\n" +
+		"› 1. Yes, proceed\n" +
+		"  2. No, and tell Codex what to do differently\n" +
+		"Press enter to confirm or esc to cancel\n"
+	pc := parseChoices(input)
+	if pc == nil {
+		t.Fatal("Codex approval prompt was not parsed")
+	}
+	if pc.Prompt != "Allow command?" || pc.ActiveIndex != 0 {
+		t.Fatalf("unexpected Codex prompt: %+v", pc)
+	}
+	want := []string{"Yes, proceed", "No, and tell Codex what to do differently"}
+	if len(pc.Choices) != len(want) {
+		t.Fatalf("Codex choices = %+v", pc.Choices)
+	}
+	for i := range want {
+		if pc.Choices[i].CleanText != want[i] {
+			t.Errorf("choice %d = %q, want %q", i, pc.Choices[i].CleanText, want[i])
+		}
+	}
+}
+
+func TestParseBinaryChoicesCodexFallback(t *testing.T) {
+	pc := parseAgentChoices("Would you like to continue? [y/n]\n")
+	if pc == nil || pc.Prompt != "Would you like to continue? [y/n]" || len(pc.Choices) != 2 {
+		t.Fatalf("binary Codex prompt not parsed: %+v", pc)
+	}
+	if pc.Choices[0].CleanText != "Yes" || pc.Choices[1].CleanText != "No" {
+		t.Fatalf("unexpected binary choices: %+v", pc.Choices)
+	}
+	if pc.Choices[0].SubmitText != "y" || pc.Choices[1].SubmitText != "n" {
+		t.Fatalf("unexpected binary input values: %+v", pc.Choices)
+	}
+}
+
+func TestParseClaudePermissionWithoutNavigationFooter(t *testing.T) {
+	input := "Bash command\nrm -rf build\n\nDo you want to proceed?\n❯ Yes\n  No\nTab to amend · Ctrl+E to explain\nEsc to cancel\n"
+	pc := parseAgentChoices(input)
+	if pc == nil || len(pc.Choices) != 2 || pc.ActiveIndex != 0 {
+		t.Fatalf("Claude permission prompt not parsed: %+v", pc)
+	}
+	if pc.Choices[0].CleanText != "Yes" || pc.Choices[1].CleanText != "No" {
+		t.Fatalf("unexpected Claude permission choices: %+v", pc.Choices)
+	}
+}
+
+func TestParseCursorlessClaudePermissionUsesBinaryInput(t *testing.T) {
+	input := "Do you want to proceed?\n1. Yes\n2. No\nEnter to select · Arrow keys to navigate\nEsc to cancel\n"
+	pc := parseAgentChoicesFor("claude", input)
+	if pc == nil || len(pc.Choices) != 2 {
+		t.Fatalf("cursorless Claude permission not parsed: %+v", pc)
+	}
+	if pc.Choices[0].SubmitText != "y" || pc.Choices[1].SubmitText != "n" {
+		t.Fatalf("cursorless inputs = %+v", pc.Choices)
+	}
+}
+
+func TestParseOpenCodePermissionButtons(t *testing.T) {
+	input := "△ Permission required\n  # Shell command\n  $ git status\n\n  Allow once  Allow always  Reject        ⇆ select  enter confirm\n"
+	pc := parseAgentChoicesFor("opencode", input)
+	if pc == nil || pc.Prompt != "# Shell command" || len(pc.Choices) != 2 {
+		t.Fatalf("OpenCode permission prompt not parsed: %+v", pc)
+	}
+	if pc.Choices[0].CleanText != "Allow once" || pc.Choices[0].DirectKey != "Enter" {
+		t.Fatalf("unexpected allow action: %+v", pc.Choices[0])
+	}
+	if pc.Choices[1].CleanText != "Reject" || pc.Choices[1].DirectKey != "Escape" {
+		t.Fatalf("unexpected reject action: %+v", pc.Choices[1])
+	}
+	if kb := buildChoiceKeyboard(pc, "nonce"); kb == nil || len(kb.InlineKeyboard) != 2 {
+		t.Fatalf("OpenCode permission keyboard not built: %+v", kb)
+	}
+}
+
+func TestOpenCodePermissionParserIsAgentSpecific(t *testing.T) {
+	input := "Permission required\nAllow once  Allow always  Reject\n"
+	if pc := parseAgentChoicesFor("claude", input); pc != nil {
+		t.Fatalf("OpenCode permission actions exposed for Claude: %+v", pc)
+	}
+}
+
+func TestParseChoicesRejectsCodexFreeAnswerForm(t *testing.T) {
+	input := "What should Codex do?\n> first answer field\n  second answer field\nEnter to submit answer\n"
+	if pc := parseAgentChoicesFor("codex", input); pc != nil {
+		t.Fatalf("free-answer form became choices: %+v", pc)
+	}
+}
+
+func TestChoiceSourceFingerprintCoversVisibleScreen(t *testing.T) {
+	first := parseAgentChoicesFor("codex", "Allow command?\n› 1. Yes\n  2. No\nPress enter to confirm or esc to cancel\n")
+	second := parseAgentChoicesFor("codex", "Different context\nAllow command?\n› 1. Yes\n  2. No\nPress enter to confirm or esc to cancel\n")
+	if first == nil || second == nil || first.SourceFingerprint == second.SourceFingerprint {
+		t.Fatal("visible-screen changes did not alter choice fingerprint")
 	}
 }
 
@@ -172,11 +305,48 @@ func TestParseChoicesStripsBorderAndCursor(t *testing.T) {
 	}
 }
 
+func TestParseChoicesExcludesIndentedDescriptions(t *testing.T) {
+	input := "? Select a framework\n" +
+		"│  ❯  Next.js\n" +
+		"│       React framework description\n" +
+		"│     Nuxt\n" +
+		"│       Vue framework description\n" +
+		"│     Remix\n" +
+		"└  ↑↓ to navigate · enter to select\n"
+	pc := parseChoices(input)
+	if pc == nil {
+		t.Fatal("parseChoices returned nil")
+	}
+	want := []string{"Next.js", "Nuxt", "Remix"}
+	if len(pc.Choices) != len(want) {
+		t.Fatalf("got choices %+v, want %v", pc.Choices, want)
+	}
+	for i := range want {
+		if pc.Choices[i].CleanText != want[i] {
+			t.Errorf("choice %d = %q, want %q", i, pc.Choices[i].CleanText, want[i])
+		}
+	}
+}
+
 // TestParseChoicesNoHelpBar: without a recognizable help bar there is no menu.
 func TestParseChoicesNoHelpBar(t *testing.T) {
 	input := "? Pick one\n\u276f  A\n   B\n"
 	if pc := parseChoices(input); pc != nil {
 		t.Fatalf("expected nil for input with no help bar, got %+v", pc)
+	}
+}
+
+func TestParseChoicesRequiresPrompt(t *testing.T) {
+	input := "│  ❯  First\n│     Second\n└  ↑↓ to navigate · enter to select\n"
+	if pc := parseChoices(input); pc != nil {
+		t.Fatalf("expected nil without a question prompt, got %+v", pc)
+	}
+}
+
+func TestParseChoicesRejectsSupersededMenu(t *testing.T) {
+	input := "? Old question\n❯  Yes\n   No\nenter to select\n\nNew prompt waiting for text\n"
+	if pc := parseChoices(input); pc != nil {
+		t.Fatalf("expected superseded menu to be rejected, got %+v", pc)
 	}
 }
 
@@ -196,6 +366,9 @@ func TestParseChoicesAllCursors(t *testing.T) {
 	if len(pc.Choices) != 2 {
 		t.Fatalf("expected 2 choices, got %d: %+v", len(pc.Choices), pc.Choices)
 	}
+	if !pc.MultiSelect {
+		t.Error("expected multiselect prompt")
+	}
 	if pc.Choices[0].CleanText != "Option A" {
 		t.Errorf("choice 0: got '%s'", pc.Choices[0].CleanText)
 	}
@@ -204,36 +377,41 @@ func TestParseChoicesAllCursors(t *testing.T) {
 	}
 }
 
-// TestBuildChoiceKeyboard verifies the layout (5 per row) and the 1-based
-// "ch|{paneID}|{index}" callback data that choiceCallbackHandler relies on.
+// TestBuildChoiceKeyboard verifies the readable one-choice-per-row layout and
+// the 1-based callback data that choiceCallbackHandler relies on.
 func TestBuildChoiceKeyboard(t *testing.T) {
-	pc := &parsedChoices{Choices: []parsedChoice{
-		{"A"}, {"B"}, {"C"}, {"D"}, {"E"}, {"F"},
+	pc := &parsedChoices{ActiveIndex: 0, Choices: []parsedChoice{
+		{CleanText: "A"}, {CleanText: "B"}, {CleanText: "C"},
+		{CleanText: "D"}, {CleanText: "E"}, {CleanText: "F"},
 	}}
-	kb := buildChoiceKeyboard(pc, "wA:p1")
+	kb := buildChoiceKeyboard(pc, "nonce123")
 	if kb == nil {
 		t.Fatal("nil keyboard")
 	}
-	// 6 choices, 5 per row -> 2 rows.
-	if got := len(kb.InlineKeyboard); got != 2 {
-		t.Fatalf("expected 2 rows, got %d", got)
+	if got := len(kb.InlineKeyboard); got != 6 {
+		t.Fatalf("expected 6 rows, got %d", got)
 	}
-	if got := len(kb.InlineKeyboard[0]); got != 5 {
-		t.Fatalf("expected 5 buttons in row 0, got %d", got)
-	}
-	if got := len(kb.InlineKeyboard[1]); got != 1 {
-		t.Fatalf("expected 1 button in row 1, got %d", got)
-	}
-	for i, btn := range kb.InlineKeyboard[0] {
-		wantData := fmt.Sprintf("ch|wA:p1|%d", i+1)
+	for i, row := range kb.InlineKeyboard {
+		if len(row) != 1 {
+			t.Fatalf("row %d has %d buttons", i, len(row))
+		}
+		btn := row[0]
+		wantData := fmt.Sprintf("ch|nonce123|%d", i+1)
 		if btn.CallbackData != wantData {
-			t.Errorf("row0[%d] data=%q, want %q", i, btn.CallbackData, wantData)
+			t.Errorf("row %d data=%q, want %q", i, btn.CallbackData, wantData)
 		}
-		if btn.Text != strconv.Itoa(i+1) {
-			t.Errorf("row0[%d] text=%q, want %q", i, btn.Text, strconv.Itoa(i+1))
+		wantText := strconv.Itoa(i+1) + " · " + pc.Choices[i].CleanText
+		if btn.Text != wantText {
+			t.Errorf("row %d text=%q, want %q", i, btn.Text, wantText)
 		}
 	}
-	if kb.InlineKeyboard[1][0].CallbackData != "ch|wA:p1|6" {
-		t.Errorf("row1[0] data=%q, want \"ch|wA:p1|6\"", kb.InlineKeyboard[1][0].CallbackData)
+}
+
+func TestBuildChoiceKeyboardRejectsUnverifiableMenus(t *testing.T) {
+	if kb := buildChoiceKeyboard(&parsedChoices{ActiveIndex: -1, Choices: []parsedChoice{{CleanText: "A"}}}, "nonce"); kb != nil {
+		t.Error("expected menu with unknown cursor to have no keyboard")
+	}
+	if kb := buildChoiceKeyboard(&parsedChoices{ActiveIndex: 0, MultiSelect: true, Choices: []parsedChoice{{CleanText: "A"}}}, "nonce"); kb != nil {
+		t.Error("expected multiselect menu to have no keyboard")
 	}
 }

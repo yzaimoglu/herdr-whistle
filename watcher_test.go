@@ -13,7 +13,7 @@ import (
 
 // sampleAgentListJSON simulates a herdr agent list response.
 // result is a raw JSON object (not a string), matching the real herdr CLI format.
-const sampleAgentListJSON = `{"id":"cli:agent:list","result":{"agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"ses-111"},"agent_status":"%s","cwd":"/home/user/proj","focused":true,"pane_id":"wA:p1","tab_id":"wA:t1","terminal_id":"term_1","workspace_id":"wA"},{"agent":"opencode","agent_session":{"agent":"opencode","kind":"id","source":"herdr:opencode","value":"ses-222"},"agent_status":"%s","cwd":"/home/user/other","focused":false,"pane_id":"wB:p2","tab_id":"wB:t2","terminal_id":"term_2","workspace_id":"wB"}]}}`
+const sampleAgentListJSON = `{"id":"cli:agent:list","result":{"agents":[{"name":"reviewer","agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"ses-111"},"agent_status":"%s","cwd":"/home/user/proj","focused":true,"pane_id":"wA:p1","tab_id":"wA:t1","terminal_id":"term_1","workspace_id":"wA"},{"name":"builder","agent":"opencode","agent_session":{"agent":"opencode","kind":"id","source":"herdr:opencode","value":"ses-222"},"agent_status":"%s","cwd":"/home/user/other","focused":false,"pane_id":"wB:p2","tab_id":"wB:t2","terminal_id":"term_2","workspace_id":"wB"}]}}`
 
 func TestAgentWatcherParse(t *testing.T) {
 	payload := fmt.Sprintf(sampleAgentListJSON, "idle", "idle")
@@ -124,7 +124,7 @@ func TestNoNotificationOnSameStatus(t *testing.T) {
 	}
 }
 
-func TestNoNotificationIfAlreadyBlocked(t *testing.T) {
+func TestNotificationIfAlreadyBlocked(t *testing.T) {
 	callCount := 0
 	herdrAgentList = func() (string, error) {
 		return fmt.Sprintf(sampleAgentListJSON, "blocked", "idle"), nil
@@ -141,8 +141,8 @@ func TestNoNotificationIfAlreadyBlocked(t *testing.T) {
 
 	agentWatcher(ctx, &bot.Bot{}, 0)
 
-	if callCount != 0 {
-		t.Errorf("expected 0 notifications for already-blocked, got %d", callCount)
+	if callCount != 1 {
+		t.Errorf("expected 1 recovery notification for already-blocked agent, got %d", callCount)
 	}
 }
 
@@ -170,8 +170,8 @@ func TestNoNotificationBlockedToIdle(t *testing.T) {
 
 	agentWatcher(ctx, &bot.Bot{}, 0)
 
-	if callCount != 0 {
-		t.Errorf("expected 0 notifications for blocked->idle, got %d", callCount)
+	if callCount != 1 {
+		t.Errorf("expected only the initial blocked notification, got %d", callCount)
 	}
 }
 
@@ -210,7 +210,7 @@ func TestMultipleTransitionsToBlocked(t *testing.T) {
 
 func TestSessionKeyDeduplication(t *testing.T) {
 	// Same pane_id, different session_id = new session.
-	// New session starting in "blocked" should NOT trigger notification.
+	// New session starting in "blocked" should trigger a fresh notification.
 	callCount := 0
 	callNum := 0
 
@@ -235,8 +235,8 @@ func TestSessionKeyDeduplication(t *testing.T) {
 
 	agentWatcher(ctx, &bot.Bot{}, 0)
 
-	if callCount != 0 {
-		t.Errorf("expected 0 notifications for new session, got %d", callCount)
+	if callCount != 1 {
+		t.Errorf("expected 1 notification for new blocked session, got %d", callCount)
 	}
 }
 
@@ -288,6 +288,55 @@ func TestAgentStatusLowercasing(t *testing.T) {
 		if lowered != "blocked" {
 			t.Errorf("expected lowered 'blocked', got '%s'", lowered)
 		}
+	}
+}
+
+func TestAgentTrackingIdentityWithoutSession(t *testing.T) {
+	first := agentInfo{TerminalID: "term-1", StateChangeSeq: 10}
+	replacement := agentInfo{TerminalID: "term-1", StateChangeSeq: 11}
+	if agentTrackingIdentity(first) == agentTrackingIdentity(replacement) {
+		t.Fatal("sessionless replacement reused watcher identity")
+	}
+	withSession := agentInfo{TerminalID: "term-1", StateChangeSeq: 12, AgentSession: agentSession{Value: "session-1"}}
+	if got := agentTrackingIdentity(withSession); got != "session:session-1" {
+		t.Errorf("identity = %q, want session identity", got)
+	}
+}
+
+func TestBlockedActionKeyboardAlwaysOffersActions(t *testing.T) {
+	agent := agentInfo{PaneID: "w1:p1", TerminalID: "term-1", Agent: "claude", StateChangeSeq: 10}
+	keyboard := blockedActionKeyboard(agent, nil)
+	if keyboard == nil || len(keyboard.InlineKeyboard) != 2 {
+		t.Fatalf("unexpected blocked keyboard: %+v", keyboard)
+	}
+	callbacks := []string{
+		keyboard.InlineKeyboard[0][0].CallbackData,
+		keyboard.InlineKeyboard[0][1].CallbackData,
+		keyboard.InlineKeyboard[1][0].CallbackData,
+	}
+	for i, prefix := range []string{"al|prompt|", "al|output|", "al|open|"} {
+		if !strings.HasPrefix(callbacks[i], prefix) {
+			t.Errorf("callback %d = %q, want prefix %q", i, callbacks[i], prefix)
+		}
+	}
+}
+
+func TestBlockedTextChoiceKeyboard(t *testing.T) {
+	agent := agentInfo{PaneID: "w1:p1", TerminalID: "term-1", Agent: "claude", StateChangeSeq: 10}
+	choices := &parsedChoices{ActiveIndex: -1, Choices: []parsedChoice{
+		{CleanText: "Approve once", SubmitText: "Approve once"},
+		{CleanText: "Reject", SubmitText: "Reject"},
+		{CleanText: "Type your own answer"},
+	}}
+	keyboard := blockedTextChoiceKeyboard(agent, choices)
+	if keyboard == nil || len(keyboard.InlineKeyboard) != 2 {
+		t.Fatalf("unexpected text-choice keyboard: %+v", keyboard)
+	}
+	if !strings.HasPrefix(keyboard.InlineKeyboard[0][0].CallbackData, "br|") {
+		t.Errorf("unexpected callback: %q", keyboard.InlineKeyboard[0][0].CallbackData)
+	}
+	if !strings.Contains(keyboard.InlineKeyboard[0][0].Text, "Approve once") {
+		t.Errorf("choice label missing: %q", keyboard.InlineKeyboard[0][0].Text)
 	}
 }
 

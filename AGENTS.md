@@ -39,15 +39,15 @@ All `.go` files are `package main`. No sub-packages.
 ## Autostart & single-instance
 
 The bot starts itself when herdr starts, fully contained in the plugin (no
-systemd/cron). The manifest hooks `workspace.created` and `workspace.focused`
-to the `start` subcommand; the first workspace use after server boot launches
-the bot.
+systemd/cron). A `[[startup]]` hook launches it after Herdr restores the
+session; `workspace.created` and `workspace.focused` events provide lazy crash
+recovery. Every path invokes the idempotent `start` subcommand.
 
 Subcommands (`./herdr-whistle <cmd>`):
 
 - `start` - probe the single-instance lock; if free, spawn a detached `run`
-  worker (new session via `setsid`, stdio to the state dir's `bot.log`) and
-  return immediately so herdr is not blocked. No-op if an instance is running.
+  worker (new session via `setsid`, stdio to the state dir's `bot.log`) and wait
+  for configuration and Telegram initialization. No-op if an instance is running.
 - `run` - the foreground bot (also the default). Acquires the single-instance
   lock, writes the pidfile, then blocks on Telegram polling until SIGINT/SIGTERM.
 - `stop` - SIGTERM the running instance via its pidfile. Idempotent.
@@ -68,7 +68,7 @@ being temporarily down (the watcher logs and retries).
 
 - Binary resolved from `HERDR_BIN_PATH` env var (falls back to `herdr` in PATH).
 - All commands use `exec.CommandContext` with 30-second timeout.
-- Key subcommands: `agent list`, `agent get`, `agent explain --json`, `agent read --source recent-unwrapped --lines N`, `agent start`, `pane run`, `pane close`.
+- Key subcommands: `agent list`, `agent get`, `agent explain --json`, `agent read --source recent-unwrapped --lines N`, `agent prompt`, `agent send-keys`, `agent start`, `pane close`.
 - `/read` reads via `--source recent-unwrapped` (not the default source).
 
 ## TOML config
@@ -76,9 +76,10 @@ being temporarily down (the watcher logs and retries).
 ```toml
 token = "bot:token"
 owner_id = 12345
+chat_id = 12345
 ```
 
-Only `token` (string) and `owner_id` (int64). Hard-fails if either is empty/zero.
+The config must have mode `0600`. `chat_id` must equal `owner_id`, which restricts the bot to the owner's private chat.
 
 ## Telegram handler registration
 
@@ -88,15 +89,18 @@ Command patterns omit the leading `/`:
 
 ## Inline keyboard callbacks
 
-- Agent list buttons: `al|{action}|{paneID}` (actions: `status`, `read`, `close`, `close_confirm`, `close_cancel`, `refresh`)
-- Choice buttons: `ch|{paneID}|{index}` (1-based)
+- Dashboard buttons: `al|{action}|{short-lived token}`. Server-side registries bind tokens to terminal, session, and state generation.
+- Prompt buttons send a Telegram Force Reply; pending replies are keyed by chat and bot message ID, expire, and are claimed once.
+- Choice buttons: `ch|{one-use nonce}|{index}` (1-based). The registry binds the nonce to agent identity, prompt fingerprint, count, state generation, and expiry.
 
 ## Blocked agent detection
 
-`watcher.go` polls every 5s, tracks status per `(paneID, sessionID)`. Notifies only on transition from any other status to `"blocked"`. Notifications include choice menu parsing (two parsers: @clack/prompts first, box-drawing fallback).
+`watcher.go` polls every 5s and tracks status per `(paneID, sessionID)`. It notifies on discovery or transition to `"blocked"`. Safe single-select prompts get one-use navigation or exact-input buttons; unsupported forms retain Force Reply and output actions.
+
+Choice parsing covers OpenCode box prompts, Claude Code permission/navigation forms, and Codex approval plus binary `[y/n]` prompts. Every option token binds the complete visible-screen fingerprint and state generation; free-answer forms use Force Reply instead.
 
 ## Message safety
 
-- `sanitizeTTY()` strips control characters below 0x20 except `\n`, `\r`, `\t`
+- `sanitizeTTY()` strips Unicode control characters except `\n` and `\t`
 - `escapeHTML()` escapes `& < >` for Telegram HTML mode
 - All formatted messages use `ParseModeHTML` and pre-escaped text

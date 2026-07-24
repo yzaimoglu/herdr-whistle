@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // errLockHeld is returned by acquireInstanceLock when another process already
@@ -73,9 +74,8 @@ func instanceLocked(dir string) (bool, error) {
 }
 
 // runStart implements the "start" subcommand: if no instance holds the lock, it
-// spawns a detached "run" worker (new session, stdio to bot.log) and returns
-// immediately so herdr is not blocked. If an instance is already running it is a
-// no-op.
+// spawns a detached "run" worker (new session, stdio to bot.log) and waits for
+// its readiness signal. If an instance is already running it is a no-op.
 func runStart() error {
 	dir, err := canonicalStateDir()
 	if err != nil {
@@ -107,17 +107,37 @@ func runStart() error {
 	cmd.Stdin = nil
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.Env = os.Environ()
+	readyReader, readyWriter, err := os.Pipe()
+	if err != nil {
+		_ = logFile.Close()
+		return fmt.Errorf("creating readiness pipe: %w", err)
+	}
+	defer readyReader.Close()
+	cmd.ExtraFiles = []*os.File{readyWriter}
+	cmd.Env = append(os.Environ(), "HERDR_WHISTLE_READY_FD=3")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
+		_ = readyWriter.Close()
 		_ = logFile.Close()
 		return fmt.Errorf("starting worker: %w", err)
 	}
 	pid := cmd.Process.Pid
+	_ = readyWriter.Close()
+	_ = logFile.Close()
+	if err := readyReader.SetReadDeadline(time.Now().Add(40 * time.Second)); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("setting worker readiness deadline: %w", err)
+	}
+	var ready [1]byte
+	if _, err := readyReader.Read(ready[:]); err != nil || ready[0] != 1 {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("worker failed before becoming ready; inspect %s", logPath)
+	}
 	// Release the handle and intentionally do not Wait. When this process exits
 	// the worker is reparented to init and will not become a zombie.
 	_ = cmd.Process.Release()
-	_ = logFile.Close()
 	log.Printf("started herdr-whistle worker (pid %d); log: %s", pid, logPath)
 	return nil
 }

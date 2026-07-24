@@ -1,8 +1,16 @@
 id = "herdr-whistle"
 name = "Herdr Whistle"
-version = "0.1.0"
-min_herdr_version = "0.7.0"
+version = "0.2.0"
+min_herdr_version = "0.7.5"
 description = "Telegram bot for remote herdr agent management - list, read, send, and restart agents via Telegram"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["go", "build", "-trimpath", "-o", "herdr-whistle", "."]
+platforms = ["linux", "macos"]
+
+[[startup]]
+command = ["./herdr-whistle", "start"]
 platforms = ["linux", "macos"]
 
 [[actions]]
@@ -17,8 +25,8 @@ title = "Stop Telegram bot"
 contexts = ["workspace"]
 command = ["./herdr-whistle", "stop"]
 
-# Auto-start on first workspace use after herdr server boot. The start
-# subcommand is a no-op if an instance is already running (canonical flock).
+# Workspace events provide lazy crash recovery after the startup hook. The
+# start subcommand is a no-op if an instance is already running.
 [[events]]
 on = "workspace.created"
 command = ["./herdr-whistle", "start"]
