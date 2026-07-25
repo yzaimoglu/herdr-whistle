@@ -12,7 +12,6 @@ import (
 type userPreferences struct {
 	NotifyBlocked   bool   `json:"notify_blocked"`
 	NotifyCompleted bool   `json:"notify_completed"`
-	NotifyStarted   bool   `json:"notify_started"`
 	UIMode          string `json:"ui_mode"`
 }
 
@@ -33,7 +32,7 @@ func defaultUXState() persistedUXState {
 	return persistedUXState{
 		Version: 1,
 		Preferences: userPreferences{
-			NotifyBlocked: true, NotifyCompleted: true, NotifyStarted: true, UIMode: "dashboard",
+			NotifyBlocked: true, NotifyCompleted: true, UIMode: "dashboard",
 		},
 	}
 }

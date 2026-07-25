@@ -825,12 +825,48 @@ func deliverCursorChoice(
 	validate func() error,
 	pause func(),
 ) error {
-	if initial == nil || initial.ActiveIndex < 0 || selectedIndex < 1 || selectedIndex > len(initial.Choices) {
+	if err := moveChoiceCursor(initial, selectedIndex, sendKey, readChoices, validate, pause); err != nil {
+		return err
+	}
+	if err := validate(); err != nil {
+		return err
+	}
+	return sendKey("Enter")
+}
+
+func moveChoiceCursor(
+	initial *parsedChoices,
+	selectedIndex int,
+	sendKey func(string) error,
+	readChoices func() *parsedChoices,
+	validate func() error,
+	pause func(),
+) error {
+	if initial == nil || selectedIndex < 1 || selectedIndex > len(initial.Choices) {
 		return fmt.Errorf("invalid cursor selection")
 	}
 	menuFingerprint := choiceMenuFingerprint(initial)
 	cursor := initial.ActiveIndex
 	target := selectedIndex - 1
+	if cursor != target && initial.Choices[target].NavigateKey != "" {
+		if err := validate(); err != nil {
+			return err
+		}
+		if err := sendKey(initial.Choices[target].NavigateKey); err != nil {
+			return err
+		}
+		for attempt := 0; attempt < 20; attempt++ {
+			pause()
+			current := readChoices()
+			if current != nil && choiceMenuFingerprint(current) == menuFingerprint && current.ActiveIndex == target {
+				return nil
+			}
+		}
+		return fmt.Errorf("choice cursor did not move to option %d", selectedIndex)
+	}
+	if cursor < 0 {
+		return fmt.Errorf("choice cursor is not visible")
+	}
 	for cursor != target {
 		key := "Down"
 		expected := cursor + 1
@@ -861,10 +897,48 @@ func deliverCursorChoice(
 			return fmt.Errorf("choice cursor did not move to option %d", expected+1)
 		}
 	}
-	if err := validate(); err != nil {
-		return err
+	return nil
+}
+
+func validatePendingChoiceAgent(pending pendingChoice) (agentInfo, error) {
+	agent, err := currentAgentByPane(pending.PaneID)
+	if err != nil {
+		return agentInfo{}, err
 	}
-	return sendKey("Enter")
+	if strings.ToLower(agent.AgentStatus) != "blocked" {
+		return agentInfo{}, fmt.Errorf("agent is no longer blocked")
+	}
+	if pending.SessionID != "" && agent.AgentSession.Value != pending.SessionID {
+		return agentInfo{}, fmt.Errorf("agent session has changed")
+	}
+	if pending.StateSeq == 0 || agent.StateChangeSeq != pending.StateSeq {
+		return agentInfo{}, fmt.Errorf("agent state generation has changed")
+	}
+	if pending.AgentName != "" && agent.Name != pending.AgentName {
+		return agentInfo{}, fmt.Errorf("agent identity has changed")
+	}
+	if agent.Agent != pending.AgentKind {
+		return agentInfo{}, fmt.Errorf("agent kind has changed")
+	}
+	if agent.TerminalID == "" || agent.TerminalID != pending.TerminalID {
+		return agentInfo{}, fmt.Errorf("agent terminal has changed")
+	}
+	return agent, nil
+}
+
+func waitChoiceDismissed(pending pendingChoice, prompt string) bool {
+	for attempt := 0; attempt < 20; attempt++ {
+		time.Sleep(100 * time.Millisecond)
+		agent, err := currentAgentByPane(pending.PaneID)
+		if err != nil || strings.ToLower(agent.AgentStatus) != "blocked" || agent.StateChangeSeq != pending.StateSeq {
+			return true
+		}
+		current := parseAgentChoicesFor(pending.AgentKind, readPaneText(pending.PaneID))
+		if current == nil || current.Prompt != prompt {
+			return true
+		}
+	}
+	return false
 }
 
 func abs(value int) int {
@@ -941,39 +1015,19 @@ func choiceCallbackHandler(ctx context.Context, b *bot.Bot, update *models.Updat
 		sendText(ctx, b, chatID, "This choice expired or was already used. The other notification actions remain available.")
 		return
 	}
+	_, _ = takeBlockedMessage(pending.TerminalID)
 
 	_, err = paneOperations.run("terminal:"+pending.TerminalID, func() (string, error) {
 		validate := func() error {
-			agent, err := currentAgentByPane(pending.PaneID)
-			if err != nil {
-				return err
-			}
-			if strings.ToLower(agent.AgentStatus) != "blocked" {
-				return fmt.Errorf("agent is no longer blocked")
-			}
-			if pending.SessionID != "" && agent.AgentSession.Value != pending.SessionID {
-				return fmt.Errorf("agent session has changed")
-			}
-			if pending.StateSeq == 0 || agent.StateChangeSeq != pending.StateSeq {
-				return fmt.Errorf("agent state generation has changed")
-			}
-			if pending.AgentName != "" && agent.Name != pending.AgentName {
-				return fmt.Errorf("agent identity has changed")
-			}
-			if agent.Agent != pending.AgentKind {
-				return fmt.Errorf("agent kind has changed")
-			}
-			if agent.TerminalID == "" || agent.TerminalID != pending.TerminalID {
-				return fmt.Errorf("agent terminal has changed")
-			}
-			return nil
+			_, err := validatePendingChoiceAgent(pending)
+			return err
 		}
 		if err := validate(); err != nil {
 			return "", err
 		}
 		currentText := readPaneText(pending.PaneID)
 		current := parseAgentChoicesFor(pending.AgentKind, currentText)
-		if current == nil || current.MultiSelect || choiceFingerprint(current) != pending.Fingerprint {
+		if !matchesPendingChoice(pending, current) {
 			return "", fmt.Errorf("prompt or cursor has changed")
 		}
 		if idx > len(current.Choices) {
@@ -987,7 +1041,13 @@ func choiceCallbackHandler(ctx context.Context, b *bot.Bot, update *models.Updat
 			if err := validate(); err != nil {
 				return "", err
 			}
-			return "", sendKey(key)
+			if err := sendKey(key); err != nil {
+				return "", err
+			}
+			if !waitChoiceDismissed(pending, current.Prompt) {
+				return "", fmt.Errorf("selection was sent but the prompt did not close")
+			}
+			return "", nil
 		}
 		if current.ActiveIndex < 0 {
 			return "", fmt.Errorf("choice cursor is not visible")
@@ -1000,6 +1060,9 @@ func choiceCallbackHandler(ctx context.Context, b *bot.Bot, update *models.Updat
 			validate,
 			func() { time.Sleep(100 * time.Millisecond) },
 		)
+		if err == nil && !waitChoiceDismissed(pending, current.Prompt) {
+			err = fmt.Errorf("selection was sent but the prompt did not close")
+		}
 		return "", err
 	})
 	if err != nil {
@@ -1017,6 +1080,164 @@ func choiceCallbackHandler(ctx context.Context, b *bot.Bot, update *models.Updat
 	editMessageText(ctx, b, chatID, msgID,
 		fmt.Sprintf("Sent choice <b>%s</b> to <b>%s</b>.", escapeHTML(choiceIndex), escapeHTML(pending.PaneID)))
 	recordAgentActivity("response", agentInfo{Name: pending.AgentName, Agent: pending.AgentKind, PaneID: pending.PaneID, TerminalID: pending.TerminalID})
+}
+
+func customChoiceCallbackHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.CallbackQuery == nil || !strings.HasPrefix(update.CallbackQuery.Data, customChoiceCallbackPrefix) {
+		return
+	}
+	chatID, msgID, ok := callbackChatInfo(update)
+	if !ok {
+		return
+	}
+	userID := update.CallbackQuery.From.ID
+	if !isAuthorized(userID, chatID) {
+		b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: update.CallbackQuery.ID, Text: "Unauthorized", ShowAlert: true})
+		return
+	}
+	b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: update.CallbackQuery.ID})
+	parts := strings.SplitN(strings.TrimPrefix(update.CallbackQuery.Data, customChoiceCallbackPrefix), "|", 2)
+	if len(parts) != 2 {
+		return
+	}
+	idx, err := strconv.Atoi(parts[1])
+	if err != nil || idx < 1 {
+		return
+	}
+	pending, ok := pendingChoices.claim(parts[0])
+	if !ok || idx > pending.ChoiceCount {
+		sendText(ctx, b, chatID, "This custom-answer request expired. Reopen the agent and try again.")
+		return
+	}
+	_, _ = takeBlockedMessage(pending.TerminalID)
+	agent, err := validatePendingChoiceAgent(pending)
+	if err == nil {
+		current := parseAgentChoicesFor(pending.AgentKind, readPaneText(pending.PaneID))
+		if !matchesPendingChoice(pending, current) || idx > len(current.Choices) || !current.Choices[idx-1].Custom {
+			err = fmt.Errorf("question has changed")
+		}
+	}
+	if err != nil {
+		editFormattedWithKeyboard(ctx, b, chatID, msgID, "Custom answer not started: "+escapeHTML(err.Error()), agentOpenKeyboard(agent))
+		return
+	}
+	request := fmt.Sprintf("Reply with your custom answer for <b>%s</b>.\n\nThe question is still waiting in Claude. This request expires in 10 minutes.", escapeHTML(currentQuestionLabel(pending)))
+	sent, err := b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: chatID, Text: request, ParseMode: models.ParseModeHTML,
+		ReplyMarkup: &models.ForceReply{ForceReply: true, InputFieldPlaceholder: "Type your custom answer…", Selective: true},
+	})
+	if err != nil {
+		log.Printf("ERROR requesting custom choice reply: %v", err)
+		return
+	}
+	pendingCustomChoices.register(chatID, sent.ID, userID, pending, idx)
+	editMessageText(ctx, b, chatID, msgID, "Waiting for your custom answer…")
+}
+
+func currentQuestionLabel(pending pendingChoice) string {
+	current := parseAgentChoicesFor(pending.AgentKind, readPaneText(pending.PaneID))
+	if current != nil && current.Prompt != "" {
+		return current.Prompt
+	}
+	return pending.PaneID
+}
+
+func pendingCustomChoiceReplyMatch(update *models.Update) bool {
+	if update.Message == nil || update.Message.From == nil || update.Message.ReplyToMessage == nil || strings.TrimSpace(update.Message.Text) == "" {
+		return false
+	}
+	return pendingCustomChoices.has(update.Message.Chat.ID, update.Message.ReplyToMessage.ID, update.Message.From.ID)
+}
+
+func customChoiceReplyHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if !pendingCustomChoiceReplyMatch(update) || !isAuthorized(update.Message.From.ID, update.Message.Chat.ID) {
+		return
+	}
+	pending, ok := pendingCustomChoices.claim(update.Message.Chat.ID, update.Message.ReplyToMessage.ID, update.Message.From.ID)
+	if !ok {
+		return
+	}
+	text := strings.TrimSpace(sanitizeTTY(update.Message.Text))
+	if text == "" {
+		sendText(ctx, b, update.Message.Chat.ID, "Custom answer is empty. Reopen the question and try again.")
+		return
+	}
+	if len([]rune(text)) > 500 {
+		sendText(ctx, b, update.Message.Chat.ID, "Custom answer is too long (maximum 500 characters). Reopen the question and try again.")
+		return
+	}
+	stopTyping := startTyping(ctx, b, update.Message.Chat.ID)
+	agent, err := submitCustomChoice(pending.Choice, pending.Index, text)
+	stopTyping()
+	if err != nil {
+		sendText(ctx, b, update.Message.Chat.ID, "Custom answer was not sent: "+err.Error())
+		return
+	}
+	recordAgentActivity("response", agent)
+	message := fmt.Sprintf("✅ Sent custom answer to <b>%s</b>.", escapeHTML(agentUILabel(agent)))
+	sendFormattedWithKeyboard(ctx, b, update.Message.Chat.ID, message, agentOpenKeyboard(agent))
+}
+
+func submitCustomChoice(pending pendingChoice, index int, text string) (agentInfo, error) {
+	var submittedTo agentInfo
+	_, err := paneOperations.run("terminal:"+pending.TerminalID, func() (string, error) {
+		agent, err := validatePendingChoiceAgent(pending)
+		if err != nil {
+			return "", err
+		}
+		current := parseAgentChoicesFor(pending.AgentKind, readPaneText(pending.PaneID))
+		if !matchesPendingChoice(pending, current) || index < 1 || index > len(current.Choices) || !current.Choices[index-1].Custom {
+			return "", fmt.Errorf("question has changed")
+		}
+		sendKey := func(key string) error {
+			_, err := herdrAgentSendKeys(pending.PaneID, key)
+			return err
+		}
+		validate := func() error {
+			_, err := validatePendingChoiceAgent(pending)
+			return err
+		}
+		if err := moveChoiceCursor(
+			current,
+			index,
+			sendKey,
+			func() *parsedChoices { return parseAgentChoicesFor(pending.AgentKind, readPaneText(pending.PaneID)) },
+			validate,
+			func() { time.Sleep(100 * time.Millisecond) },
+		); err != nil {
+			return "", err
+		}
+		if err := validate(); err != nil {
+			return "", err
+		}
+		if _, err := herdrPaneSendText(pending.PaneID, text); err != nil {
+			return "", err
+		}
+	typed:
+		for attempt := 0; attempt < 20; attempt++ {
+			time.Sleep(100 * time.Millisecond)
+			visible := readPaneText(pending.PaneID)
+			parsed := parseAgentChoicesFor(pending.AgentKind, visible)
+			if parsed != nil && parsed.ActiveIndex == index-1 && strings.Contains(strings.Join(strings.Fields(visible), " "), strings.Join(strings.Fields(text), " ")) {
+				break typed
+			}
+			if attempt == 19 {
+				return "", fmt.Errorf("custom text did not appear in Claude")
+			}
+		}
+		if err := validate(); err != nil {
+			return "", err
+		}
+		if err := sendKey("Enter"); err != nil {
+			return "", err
+		}
+		if !waitChoiceDismissed(pending, current.Prompt) {
+			return "", fmt.Errorf("custom answer was typed but the question did not close")
+		}
+		submittedTo = agent
+		return "", nil
+	})
+	return submittedTo, err
 }
 
 func blockedResponseCallbackHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -1042,6 +1263,7 @@ func blockedResponseCallbackHandler(ctx context.Context, b *bot.Bot, update *mod
 		sendText(ctx, b, chatID, "This option expired or was already used. The other notification actions remain available.")
 		return
 	}
+	_, _ = takeBlockedMessage(response.Agent.TerminalID)
 	var submittedTo agentInfo
 	_, err := paneOperations.run(agentOperationKey(response.Agent), func() (string, error) {
 		current, err := refreshAgentSnapshot(response.Agent)
@@ -1053,7 +1275,7 @@ func blockedResponseCallbackHandler(ctx context.Context, b *bot.Bot, update *mod
 		}
 		visible := readPaneText(current.PaneID)
 		choices := parseAgentChoicesFor(current.Agent, visible)
-		if choices == nil || choiceFingerprint(choices) != response.Fingerprint {
+		if choices == nil || choiceMenuFingerprint(choices) != response.Fingerprint {
 			return "", fmt.Errorf("blocked prompt has changed")
 		}
 		latest, err := refreshAgentSnapshot(current)

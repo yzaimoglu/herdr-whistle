@@ -128,6 +128,35 @@ func TestDeliverCursorChoiceDoesNotSubmitIfCursorDoesNotMove(t *testing.T) {
 	}
 }
 
+func TestDeliverCursorChoiceUsesClaudeNumericJumpThenEnter(t *testing.T) {
+	choices := []parsedChoice{{CleanText: "First", NavigateKey: "1"}, {CleanText: "Second", NavigateKey: "2"}, {CleanText: "Third", NavigateKey: "3"}}
+	initial := &parsedChoices{Prompt: "Pick one", ActiveIndex: 0, Choices: choices}
+	active := 0
+	var sent []string
+	err := deliverCursorChoice(
+		initial,
+		3,
+		func(key string) error {
+			sent = append(sent, key)
+			if key == "3" {
+				active = 2
+			}
+			return nil
+		},
+		func() *parsedChoices {
+			return &parsedChoices{Prompt: "Pick one", ActiveIndex: active, Choices: choices}
+		},
+		func() error { return nil },
+		func() {},
+	)
+	if err != nil {
+		t.Fatalf("deliverCursorChoice failed: %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"3", "Enter"}) {
+		t.Fatalf("keys sent = %v", sent)
+	}
+}
+
 func TestFormatAgentFromGet(t *testing.T) {
 	t.Run("valid agent", func(t *testing.T) {
 		in := `{"id":"cli:agent:get","result":{"agent":{"name":"reviewer","agent":"claude","agent_status":"blocked","pane_id":"wA:p1","terminal_id":"term_1","workspace_id":"wA","cwd":"/home/user/proj"}}}`

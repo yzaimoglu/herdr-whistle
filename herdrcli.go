@@ -134,6 +134,12 @@ var herdrPaneList = func() (string, error) {
 	return runCommand(ctx, "pane", "list")
 }
 
+func herdrPaneSendText(paneID, text string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return runCommand(ctx, "pane", "send-text", paneID, text)
+}
+
 func herdrPaneClose(paneID string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

@@ -16,11 +16,46 @@ func TestChoiceRegistryIsOneUse(t *testing.T) {
 		t.Fatal("failed to register choice")
 	}
 	entry, ok := registry.claim(nonce)
-	if !ok || entry.PaneID != "w1:p1" || entry.TerminalID != "terminal-1" || entry.AgentName != "reviewer" || entry.SessionID != "session-1" || entry.ChoiceCount != 2 {
+	if !ok || entry.PaneID != "w1:p1" || entry.TerminalID != "terminal-1" || entry.AgentName != "reviewer" || entry.SessionID != "session-1" || entry.ChoiceCount != 2 || entry.MenuHash == "" {
 		t.Fatalf("unexpected claimed entry: %+v, ok=%v", entry, ok)
 	}
 	if _, ok := registry.claim(nonce); ok {
 		t.Fatal("choice nonce was accepted more than once")
+	}
+}
+
+func TestOpenCodeDirectChoiceAllowsUnrelatedScreenRedraw(t *testing.T) {
+	first := parseAgentChoicesFor("opencode", "old output\n┃\n┃  Pick one\n┃\n┃  1. Alpha\n┃  2. Beta\n┃\n")
+	second := parseAgentChoicesFor("opencode", "new unrelated output\n┃\n┃  Pick one\n┃\n┃  1. Alpha\n┃  2. Beta\n┃\n")
+	if first == nil || second == nil {
+		t.Fatal("failed to parse OpenCode choices")
+	}
+	pending := pendingChoice{AgentKind: "opencode", Fingerprint: choiceFingerprint(first), MenuHash: choiceMenuFingerprint(first)}
+	if choiceFingerprint(first) == choiceFingerprint(second) {
+		t.Fatal("test inputs did not produce a full-screen redraw")
+	}
+	if !matchesPendingChoice(pending, second) {
+		t.Fatal("unchanged OpenCode menu was rejected after unrelated redraw")
+	}
+	second.Choices[1].CleanText = "Different"
+	if matchesPendingChoice(pending, second) {
+		t.Fatal("changed OpenCode options were accepted")
+	}
+}
+
+func TestClaudeChoiceAllowsUnrelatedScreenRedraw(t *testing.T) {
+	first := parseAgentChoicesFor("claude", "old output\n? Pick one\n❯ 1. Alpha\n  2. Beta\nEnter to select\n")
+	second := parseAgentChoicesFor("claude", "new output\n? Pick one\n❯ 1. Alpha\n  2. Beta\nEnter to select\n")
+	if first == nil || second == nil {
+		t.Fatal("failed to parse Claude choices")
+	}
+	pending := pendingChoice{AgentKind: "claude", Fingerprint: choiceFingerprint(first), MenuHash: choiceMenuFingerprint(first)}
+	if !matchesPendingChoice(pending, second) {
+		t.Fatal("unchanged Claude menu was rejected after redraw")
+	}
+	second.Choices[1].CleanText = "Different"
+	if matchesPendingChoice(pending, second) {
+		t.Fatal("changed Claude option was accepted")
 	}
 }
 

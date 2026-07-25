@@ -114,7 +114,7 @@ Direct option buttons recognize OpenCode question and permission forms, Claude C
 | `/help`        | --                   | Available commands                             |
 | `/agents`      | --                   | List active agents with action buttons         |
 | `/activity`    | --                   | Show recent lifecycle and control activity     |
-| `/notifications` | --                 | Configure blocked, completed, and started alerts |
+| `/notifications` | --                 | Configure blocked and completed alerts          |
 | `/status`      | `<target>`           | Show agent status and explanation              |
 | `/read`        | `<target>` `[N]`     | Read up to 200 lines of agent output           |
 | `/send`        | `<target>` `<text>`  | Send text to an agent (unblocks it)            |

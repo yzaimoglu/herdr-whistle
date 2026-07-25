@@ -242,14 +242,54 @@ func TestParseClaudePermissionWithoutNavigationFooter(t *testing.T) {
 	}
 }
 
-func TestParseCursorlessClaudePermissionUsesBinaryInput(t *testing.T) {
+func TestParseCursorlessClaudePermissionUsesDirectNumberKeys(t *testing.T) {
 	input := "Do you want to proceed?\n1. Yes\n2. No\nEnter to select · Arrow keys to navigate\nEsc to cancel\n"
 	pc := parseAgentChoicesFor("claude", input)
 	if pc == nil || len(pc.Choices) != 2 {
 		t.Fatalf("cursorless Claude permission not parsed: %+v", pc)
 	}
-	if pc.Choices[0].SubmitText != "y" || pc.Choices[1].SubmitText != "n" {
-		t.Fatalf("cursorless inputs = %+v", pc.Choices)
+	if pc.Choices[0].DirectKey != "1" || pc.Choices[1].DirectKey != "2" {
+		t.Fatalf("direct choices = %+v", pc.Choices)
+	}
+	if pc.Choices[0].SubmitText != "" || pc.Choices[1].SubmitText != "" {
+		t.Fatalf("invented text shortcuts = %+v", pc.Choices)
+	}
+}
+
+func TestParseClaudeAskUserQuestionCustomAnswer(t *testing.T) {
+	input := "Which deployment should we use?\n\n❯ 1. Alpha\n     Deploy Alpha.\n  2. Beta\n     Deploy Beta.\n  3. Gamma\n     Deploy Gamma.\n  4. Type something.\n────────────────\n  5. Chat about this\n\nEnter to select · ↑/↓ to navigate · Esc to cancel\n"
+	pc := parseAgentChoicesFor("claude", input)
+	if pc == nil || len(pc.Choices) != 5 || pc.ActiveIndex != 0 {
+		t.Fatalf("Claude question not parsed: %+v", pc)
+	}
+	for i, choice := range pc.Choices[:3] {
+		if choice.DirectKey != strconv.Itoa(i+1) {
+			t.Errorf("choice %d direct key = %q", i, choice.DirectKey)
+		}
+	}
+	if !pc.Choices[3].Custom || pc.Choices[3].Skip {
+		t.Fatalf("Type something was not classified as custom: %+v", pc.Choices[3])
+	}
+	if pc.Choices[3].NavigateKey != "4" || pc.Choices[3].DirectKey != "" {
+		t.Fatalf("custom choice must navigate before typing: %+v", pc.Choices[3])
+	}
+	if !pc.Choices[4].Skip || pc.Choices[4].Custom {
+		t.Fatalf("Chat about this should not be automated: %+v", pc.Choices[4])
+	}
+	kb := buildChoiceKeyboard(pc, "nonce")
+	if kb == nil || len(kb.InlineKeyboard) != 4 {
+		t.Fatalf("unexpected Claude keyboard: %+v", kb)
+	}
+	if got := kb.InlineKeyboard[3][0].CallbackData; got != "cc|nonce|4" {
+		t.Fatalf("custom callback = %q", got)
+	}
+}
+
+func TestParseAgentChoicesForClaudeIncludesBoxQuestions(t *testing.T) {
+	input := "┃\n┃  Which approach?\n┃\n┃  1. Alpha\n┃  2. Beta\n┃  3. Type something.\n┃\n"
+	pc := parseAgentChoicesFor("claude", input)
+	if pc == nil || len(pc.Choices) != 3 || !pc.Choices[2].Custom || pc.Choices[1].DirectKey != "2" || pc.Choices[2].NavigateKey != "3" {
+		t.Fatalf("Claude box question not available end-to-end: %+v", pc)
 	}
 }
 
@@ -267,6 +307,30 @@ func TestParseOpenCodePermissionButtons(t *testing.T) {
 	}
 	if kb := buildChoiceKeyboard(pc, "nonce"); kb == nil || len(kb.InlineKeyboard) != 2 {
 		t.Fatalf("OpenCode permission keyboard not built: %+v", kb)
+	}
+}
+
+func TestParseOpenCodeQuestionUsesDirectNumberKeys(t *testing.T) {
+	input := "┃\n┃  Which environment?\n┃\n┃  1. Alpha\n┃  2. Beta\n┃  3. Gamma\n┃  4. Type your own answer\n┃\n"
+	pc := parseAgentChoicesFor("opencode", input)
+	if pc == nil || len(pc.Choices) != 4 {
+		t.Fatalf("OpenCode question not parsed: %+v", pc)
+	}
+	wantKeys := []string{"1", "2", "3", ""}
+	for i, want := range wantKeys {
+		if pc.Choices[i].DirectKey != want {
+			t.Errorf("choice %d direct key = %q, want %q", i, pc.Choices[i].DirectKey, want)
+		}
+		if pc.Choices[i].SubmitText != "" {
+			t.Errorf("choice %d retained unsafe text submission %q", i, pc.Choices[i].SubmitText)
+		}
+	}
+	kb := buildChoiceKeyboard(pc, "nonce")
+	if kb == nil || len(kb.InlineKeyboard) != 3 {
+		t.Fatalf("expected three direct-choice buttons, got %+v", kb)
+	}
+	if kb.InlineKeyboard[1][0].CallbackData != "ch|nonce|2" {
+		t.Fatalf("Beta callback = %q", kb.InlineKeyboard[1][0].CallbackData)
 	}
 }
 

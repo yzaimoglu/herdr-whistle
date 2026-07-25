@@ -12,9 +12,12 @@ import (
 
 // parsedChoice represents a single option in a selection prompt.
 type parsedChoice struct {
-	CleanText  string // text with selection indicator stripped
-	SubmitText string // exact text input for cursorless prompts; empty means navigation only
-	DirectKey  string // exact key for prompts whose action does not depend on a visible cursor
+	CleanText   string // text with selection indicator stripped
+	SubmitText  string // exact text input for explicit textual prompts
+	DirectKey   string // key that submits the choice immediately
+	NavigateKey string // key that focuses the choice without submitting it
+	Custom      bool   // choice opens an inline free-form answer
+	Skip        bool   // visible utility action that is unsafe to automate
 }
 
 // parsedChoices holds the parsed selection prompt.
@@ -67,17 +70,58 @@ func parseAgentChoicesFor(agent, output string) *parsedChoices {
 		}
 	}
 	if choices := parsePermissionChoices(output); choices != nil {
-		return bindChoicesToSource(choices, output)
+		return bindChoicesToSource(decorateAgentChoices(agent, choices), output)
 	}
 	if choices := parseChoices(output); choices != nil {
-		return bindChoicesToSource(choices, output)
+		return bindChoicesToSource(decorateAgentChoices(agent, choices), output)
 	}
-	if agent != "claude" && agent != "codex" {
+	if agent != "codex" {
 		if choices := parseBoxChoices(output); choices != nil {
-			return bindChoicesToSource(choices, output)
+			return bindChoicesToSource(decorateAgentChoices(agent, choices), output)
 		}
 	}
 	return bindChoicesToSource(parseBinaryChoices(output), output)
+}
+
+func decorateAgentChoices(agent string, choices *parsedChoices) *parsedChoices {
+	if choices == nil || choices.MultiSelect || len(choices.Choices) > 9 {
+		return choices
+	}
+	for i := range choices.Choices {
+		choice := &choices.Choices[i]
+		lower := strings.ToLower(strings.TrimSpace(choice.CleanText))
+		choice.Custom = strings.HasPrefix(lower, "type something") ||
+			strings.Contains(lower, "type your own") ||
+			strings.Contains(lower, "custom answer")
+		choice.Skip = strings.HasPrefix(lower, "chat about this")
+		if choice.Custom || choice.Skip {
+			choice.SubmitText = ""
+		}
+		switch agent {
+		case "opencode":
+			choice.SubmitText = ""
+			if choice.Custom {
+				choice.Skip = true
+				continue
+			}
+			choice.DirectKey = strconv.Itoa(i + 1)
+		case "claude":
+			choice.SubmitText = ""
+			if choice.Custom {
+				choice.NavigateKey = strconv.Itoa(i + 1)
+			} else {
+				choice.DirectKey = strconv.Itoa(i + 1)
+			}
+		}
+	}
+	if agent == "opencode" {
+		choices.ActiveIndex = -1
+	}
+	return choices
+}
+
+func addOpenCodeQuestionKeys(choices *parsedChoices) *parsedChoices {
+	return decorateAgentChoices("opencode", choices)
 }
 
 func parseOpenCodePermission(output string) *parsedChoices {
@@ -173,14 +217,6 @@ func parsePermissionChoices(output string) *parsedChoices {
 	}
 	if len(choices) < 2 {
 		return nil
-	}
-	if activeIndex < 0 && len(choices) == 2 {
-		first := strings.ToLower(choices[0].CleanText)
-		second := strings.ToLower(choices[1].CleanText)
-		if strings.HasPrefix(first, "yes") && strings.HasPrefix(second, "no") {
-			choices[0].SubmitText = "y"
-			choices[1].SubmitText = "n"
-		}
 	}
 	return &parsedChoices{Prompt: prompt, Choices: choices, ActiveIndex: activeIndex}
 }
@@ -440,7 +476,10 @@ func parseBoxChoices(output string) *parsedChoices {
 	}
 }
 
-const choiceCallbackPrefix = "ch|"
+const (
+	choiceCallbackPrefix       = "ch|"
+	customChoiceCallbackPrefix = "cc|"
+)
 
 // buildChoiceKeyboard builds an inline keyboard from parsed choices.
 // Each button's callback data is "ch|{nonce}|{index}" (1-based).
@@ -453,10 +492,17 @@ func buildChoiceKeyboard(pc *parsedChoices, nonce string) *models.InlineKeyboard
 	var rows [][]models.InlineKeyboardButton
 
 	for i, choice := range pc.Choices {
+		if choice.Skip || (pc.ActiveIndex < 0 && choice.DirectKey == "" && choice.NavigateKey == "") {
+			continue
+		}
 		label := strconv.Itoa(i + 1)
+		prefix := choiceCallbackPrefix
+		if choice.Custom {
+			prefix = customChoiceCallbackPrefix
+		}
 		btn := models.InlineKeyboardButton{
 			Text:         truncateButtonLabel(label+" · "+choice.CleanText, 52),
-			CallbackData: choiceCallbackPrefix + nonce + "|" + label,
+			CallbackData: prefix + nonce + "|" + label,
 		}
 		rows = append(rows, []models.InlineKeyboardButton{btn})
 	}
@@ -471,9 +517,9 @@ func hasDirectChoiceKeys(pc *parsedChoices) bool {
 		return false
 	}
 	for _, choice := range pc.Choices {
-		if choice.DirectKey == "" {
-			return false
+		if choice.DirectKey != "" || choice.NavigateKey != "" {
+			return true
 		}
 	}
-	return true
+	return false
 }

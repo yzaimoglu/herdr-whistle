@@ -53,6 +53,7 @@ func startBot(ctx context.Context, cfg *Config) error {
 	// Register command handlers.
 	// MatchTypeCommand extracts the command name WITHOUT the leading "/",
 	// so patterns must omit it (e.g. "start" not "/start").
+	b.RegisterHandlerMatchFunc(pendingCustomChoiceReplyMatch, customChoiceReplyHandler)
 	b.RegisterHandlerMatchFunc(pendingStartReplyMatch, startAgentReplyHandler)
 	b.RegisterHandlerMatchFunc(pendingPromptReplyMatch, promptReplyHandler)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "start", bot.MatchTypeCommand, startHandler)
@@ -69,6 +70,7 @@ func startBot(ctx context.Context, cfg *Config) error {
 	// Register inline keyboard callback handlers.
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbPrefix, bot.MatchTypePrefix, agentsCallbackHandler)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, choiceCallbackPrefix, bot.MatchTypePrefix, choiceCallbackHandler)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, customChoiceCallbackPrefix, bot.MatchTypePrefix, customChoiceCallbackHandler)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, blockedResponsePrefix, bot.MatchTypePrefix, blockedResponseCallbackHandler)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, startAgentPrefix, bot.MatchTypePrefix, startAgentCallbackHandler)
 

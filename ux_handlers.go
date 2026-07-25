@@ -60,12 +60,11 @@ func preferencesCard() (string, *models.InlineKeyboardMarkup) {
 		}
 		return "Off"
 	}
-	message := fmt.Sprintf("<b>Notification settings</b>\n\nNeeds input: <b>%s</b>\nAgent completed: <b>%s</b>\nAgent started: <b>%s</b>\n\nInterface: <b>%s</b>",
-		state(prefs.NotifyBlocked), state(prefs.NotifyCompleted), state(prefs.NotifyStarted), escapeHTML(prefs.UIMode))
+	message := fmt.Sprintf("<b>Notification settings</b>\n\nNeeds input: <b>%s</b>\nAgent completed: <b>%s</b>\n\nInterface: <b>%s</b>",
+		state(prefs.NotifyBlocked), state(prefs.NotifyCompleted), escapeHTML(prefs.UIMode))
 	keyboard := &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
 		{{Text: "Toggle needs input", CallbackData: "al|toggle_pref|blocked"}},
 		{{Text: "Toggle completed", CallbackData: "al|toggle_pref|completed"}},
-		{{Text: "Toggle started", CallbackData: "al|toggle_pref|started"}},
 		{{Text: "Back to agents", CallbackData: "al|back"}},
 	}}
 	return message, keyboard
@@ -117,8 +116,6 @@ func handlePreferenceToggle(ctx context.Context, b *bot.Bot, chatID int64, msgID
 			prefs.NotifyBlocked = !prefs.NotifyBlocked
 		case "completed":
 			prefs.NotifyCompleted = !prefs.NotifyCompleted
-		case "started":
-			prefs.NotifyStarted = !prefs.NotifyStarted
 		}
 	}); err != nil {
 		editMessageText(ctx, b, chatID, msgID, "Could not save settings: "+escapeHTML(err.Error()))

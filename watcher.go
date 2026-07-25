@@ -96,8 +96,7 @@ func agentWatcher(ctx context.Context, b *bot.Bot, chatID int64) {
 			}
 			if exists && oldStatus == "blocked" && currStatus != "blocked" {
 				toNotify = append(toNotify, agentLifecycleEvent{Kind: "resolved", Agent: a})
-			}
-			if exists && (currStatus == "done" || currStatus == "idle") && oldStatus != "done" && oldStatus != "idle" {
+			} else if exists && (currStatus == "done" || currStatus == "idle") && oldStatus != "done" && oldStatus != "idle" {
 				toNotify = append(toNotify, agentLifecycleEvent{Kind: "completed", Agent: a})
 			}
 			if initialized && !exists {
@@ -159,10 +158,6 @@ func notifyAgentLifecycle(ctx context.Context, b *bot.Bot, chatID int64, event a
 		}
 	case "started":
 		recordAgentActivity("started", event.Agent)
-		if chatID > 0 && currentPreferences().NotifyStarted {
-			message := fmt.Sprintf("▶ <b>%s</b> started in pane <code>%s</code>.", escapeHTML(agentUILabel(event.Agent)), escapeHTML(event.Agent.PaneID))
-			sendFormattedWithKeyboard(ctx, b, chatID, message, agentOpenKeyboard(event.Agent))
-		}
 	}
 }
 
@@ -224,7 +219,7 @@ func blockedTextChoiceKeyboard(agent agentInfo, choices *parsedChoices) *models.
 	if !ok {
 		return nil
 	}
-	fingerprint := choiceFingerprint(choices)
+	fingerprint := choiceMenuFingerprint(choices)
 	for i, choice := range choices.Choices {
 		lower := strings.ToLower(choice.CleanText)
 		if strings.Contains(lower, "type your own") || strings.Contains(lower, "custom answer") {
